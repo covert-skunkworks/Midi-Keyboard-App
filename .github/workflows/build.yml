@@ -1,18 +1,39 @@
 name: build
 
-on: [push, pull_request, workflow_dispatch]
+# Every push / PR: build, smoke-test and package all three platforms; the
+# packages are kept as run artifacts.
+# Pushing a tag v* (e.g. v1.0.0) also publishes them as a GitHub Release.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libsdl2-dev libasound2-dev
+      - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libsdl2-dev libasound2-dev xvfb
       - run: make
+      # Starts the app on a virtual display, draws one frame and exits.
+      - name: Smoke test
+        run: xvfb-run -a build/pc_midi_keyboard --screenshot build/shot-linux.bmp --demo
+      # tar keeps the executable bit, which a plain artifact zip would lose.
+      - name: Package
+        run: |
+          mkdir -p dist pkg/pc_midi_keyboard
+          cp build/pc_midi_keyboard README.md pkg/pc_midi_keyboard/
+          tar -czf dist/pc_midi_keyboard-linux-x64.tar.gz -C pkg pc_midi_keyboard
       - uses: actions/upload-artifact@v4
         with:
-          name: pc_midi_keyboard-linux
-          path: build/pc_midi_keyboard
+          name: package-linux
+          path: dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-linux
+          path: build/shot-linux.bmp
 
   windows:
     runs-on: windows-latest
@@ -30,18 +51,111 @@ jobs:
             mingw-w64-x86_64-make
             mingw-w64-x86_64-SDL2
       - run: mingw32-make
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $p = Start-Process -PassThru -Wait build/pc_midi_keyboard.exe -ArgumentList '--screenshot build/shot-windows.bmp --demo'
+          if ($p.ExitCode -ne 0 -or -not (Test-Path build/shot-windows.bmp)) { throw "app did not start (exit $($p.ExitCode))" }
+      # The .exe is fully static: nothing else is needed to run it.
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path build/pc_midi_keyboard.exe, README.md -DestinationPath dist/pc_midi_keyboard-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: pc_midi_keyboard-windows
-          path: build/pc_midi_keyboard.exe
+          name: package-windows
+          path: dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-windows
+          path: build/shot-windows.bmp
 
   macos:
-    runs-on: macos-latest
+    runs-on: macos-latest  # Apple Silicon (arm64)
     steps:
       - uses: actions/checkout@v4
-      - run: brew install sdl2 pkg-config
+      - run: brew install sdl2 pkg-config dylibbundler
       - run: make
+      # A standard .app with SDL2 copied inside, so it runs without Homebrew.
+      - name: Make app bundle
+        run: |
+          APP="pkg/PC MIDI Keyboard.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp build/pc_midi_keyboard "$APP/Contents/MacOS/"
+          cat > "$APP/Contents/Info.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>               <string>PC MIDI Keyboard</string>
+            <key>CFBundleDisplayName</key>        <string>PC MIDI Keyboard</string>
+            <key>CFBundleExecutable</key>         <string>pc_midi_keyboard</string>
+            <key>CFBundleIdentifier</key>         <string>local.pc-midi-keyboard</string>
+            <key>CFBundlePackageType</key>        <string>APPL</string>
+            <key>CFBundleShortVersionString</key> <string>${{ github.ref_name }}</string>
+            <key>CFBundleIconFile</key>           <string>AppIcon</string>
+            <key>LSMinimumSystemVersion</key>     <string>11.0</string>
+            <key>NSHighResolutionCapable</key>    <false/>
+          </dict>
+          </plist>
+          EOF
+          # Finder icon from icon.ico; the app still works if this fails.
+          ( sips -s format png icon.ico --out icon.png &&
+            mkdir icon.iconset &&
+            for s in 16 32 128 256; do
+              sips -z $s $s icon.png --out icon.iconset/icon_${s}x${s}.png
+            done &&
+            iconutil -c icns icon.iconset -o "$APP/Contents/Resources/AppIcon.icns" ) || echo "icon skipped"
+          # Copy every non-system dylib into the bundle and point the
+          # binary at the copies.
+          dylibbundler -od -b -x "$APP/Contents/MacOS/pc_midi_keyboard" \
+                       -d "$APP/Contents/Frameworks" -p @executable_path/../Frameworks/
+          # Newer Homebrew sdl2 is sdl2-compat, which loads SDL3 at run
+          # time; dylibbundler cannot see that, so bundle SDL3 too.
+          if brew list sdl3 >/dev/null 2>&1; then
+            cp "$(brew --prefix sdl3)/lib/libSDL3.0.dylib" "$APP/Contents/Frameworks/"
+            install_name_tool -id @executable_path/../Frameworks/libSDL3.0.dylib \
+                              "$APP/Contents/Frameworks/libSDL3.0.dylib"
+          fi
+          # Editing the binaries breaks their signatures; Apple Silicon kills
+          # unsigned code, so re-sign ad hoc.
+          codesign --force --deep -s - "$APP"
+      - name: Check bundle has no Homebrew references
+        run: |
+          APP="pkg/PC MIDI Keyboard.app"
+          if otool -L "$APP"/Contents/MacOS/* "$APP"/Contents/Frameworks/* | grep -E '/opt/homebrew|/usr/local'; then
+            echo "bundle still depends on Homebrew"; exit 1
+          fi
+      - name: Smoke test
+        run: '"pkg/PC MIDI Keyboard.app/Contents/MacOS/pc_midi_keyboard" --screenshot build/shot-macos.bmp --demo'
+      - name: Package
+        run: |
+          mkdir -p dist
+          # ditto keeps the bundle's symlinks, permissions and signature.
+          ditto -c -k --keepParent "pkg/PC MIDI Keyboard.app" dist/pc_midi_keyboard-macos-arm64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: pc_midi_keyboard-macos
-          path: build/pc_midi_keyboard
+          name: package-macos
+          path: dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-macos
+          path: build/shot-macos.bmp
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to create the release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

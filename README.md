@@ -29,8 +29,30 @@ brew install sdl2 pkg-config
 make
 ```
 
-Output: `build/pc_midi_keyboard`. `.github/workflows/build.yml` builds both on GitHub Actions if the project is pushed there.
+Output: `build/pc_midi_keyboard`.
 
+## Packages and releases (GitHub Actions)
+
+On every push, `.github/workflows/build.yml` builds all three platforms, starts each once as a smoke test, and packages
+them. The packages are downloadable from the run's page (Actions tab, "Artifacts").
+
+To publish a release, push a version tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow then creates a GitHub Release for that tag with:
+
+| File | Contents |
+|---|---|
+| `pc_midi_keyboard-windows-x64.zip` | `pc_midi_keyboard.exe` (static, no DLLs needed) + README |
+| `pc_midi_keyboard-linux-x64.tar.gz` | binary + README; needs the system SDL2 (`sudo apt install libsdl2-2.0-0`) |
+| `pc_midi_keyboard-macos-arm64.zip` | `PC MIDI Keyboard.app` with SDL2 bundled, Apple Silicon only |
+
+The macOS app is not signed with an Apple developer ID, so on first launch use right-click → Open (or run
+`xattr -dr com.apple.quarantine "PC MIDI Keyboard.app"`).
 
 ## Use
 
