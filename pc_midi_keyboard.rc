@@ -1,0 +1,5 @@
+// Windows resources: the icon Explorer and the taskbar show for the .exe.
+// Compiled by windres (Makefile, Windows only). The window icon itself is
+// set at run time from src/icon_data.h on every platform.
+
+1 ICON "icon.ico"
