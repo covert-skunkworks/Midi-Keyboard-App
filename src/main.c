@@ -208,6 +208,7 @@ static void widget_click( app_state *app, int id, int x, int dir );
 static void draw_widget( app_state *app, int id, const char *label,
                          const char *value, int active );
 static void draw_chord_button( app_state *app, int id );
+static void report_error( int quiet, SDL_Window *parent );
 static void draw( app_state *app );
 static int  save_screenshot( app_state *app, const char *path );
 static void handle_key( app_state *app, const SDL_KeyboardEvent *e );
@@ -1112,6 +1113,27 @@ static void draw( app_state *app )
 }
 
 /**
+  * @brief  Report the last SDL error.
+  *
+  * Unattended runs (CI smoke tests) must never open a dialog: nobody can
+  * close it, so the process would hang until the job times out.
+  *
+  * @param  quiet 1 to log to stderr only, 0 to also show a message box.
+  * @param  parent Window for the message box, may be NULL.
+  *
+  * @retval None.
+  */
+static void report_error( int quiet, SDL_Window *parent )
+{
+	fprintf( stderr, APP_TITLE ": %s\n", SDL_GetError() );
+	if ( !quiet )
+	{
+		SDL_ShowSimpleMessageBox( SDL_MESSAGEBOX_ERROR, APP_TITLE,
+		                          SDL_GetError(), parent );
+	}
+}
+
+/**
   * @brief  Draw one frame and save it as a BMP file.
   *
   * @param  app Application state.
@@ -1472,8 +1494,7 @@ int main( int argc, char *argv[] )
 
 	if ( SDL_Init( SDL_INIT_VIDEO | SDL_INIT_EVENTS ) != 0 )
 	{
-		SDL_ShowSimpleMessageBox( SDL_MESSAGEBOX_ERROR, APP_TITLE,
-		                          SDL_GetError(), NULL );
+		report_error( shot != NULL, NULL );
 		return 1;
 	}
 	// Never larger than the screen's usable area (minus room for the title
@@ -1512,8 +1533,7 @@ int main( int argc, char *argv[] )
 	}
 	if ( !app.win || !app.ren )
 	{
-		SDL_ShowSimpleMessageBox( SDL_MESSAGEBOX_ERROR, APP_TITLE,
-		                          SDL_GetError(), app.win );
+		report_error( shot != NULL, app.win );
 		SDL_Quit();
 		return 1;
 	}
@@ -1570,6 +1590,10 @@ int main( int argc, char *argv[] )
 	if ( shot )
 	{
 		quit = save_screenshot( &app, shot );
+		if ( quit != 0 )
+		{
+			report_error( 1, NULL );
+		}
 		SDL_DestroyRenderer( app.ren );
 		SDL_DestroyWindow( app.win );
 		SDL_Quit();

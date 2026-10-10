@@ -12,13 +12,17 @@ on:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    # Pinned rather than -latest: the build stays reproducible, and an older
+    # glibc lets the binary run on more distributions.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libsdl2-dev libasound2-dev xvfb
       - run: make
       # Starts the app on a virtual display, draws one frame and exits.
       - name: Smoke test
+        timeout-minutes: 2
         run: xvfb-run -a build/pc_midi_keyboard --screenshot build/shot-linux.bmp --demo
       # tar keeps the executable bit, which a plain artifact zip would lose.
       - name: Package
@@ -31,12 +35,14 @@ jobs:
           name: package-linux
           path: dist/*
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: screenshot-linux
           path: build/shot-linux.bmp
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 20
     defaults:
       run:
         shell: msys2 {0}
@@ -44,14 +50,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          # UCRT64 is MSYS2's recommended environment (MINGW64 is deprecated).
+          msystem: UCRT64
           update: true
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-make
-            mingw-w64-x86_64-SDL2
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-SDL2
       - run: mingw32-make
       - name: Smoke test
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $p = Start-Process -PassThru -Wait build/pc_midi_keyboard.exe -ArgumentList '--screenshot build/shot-windows.bmp --demo'
@@ -67,17 +75,40 @@ jobs:
           name: package-windows
           path: dist/*
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: screenshot-windows
           path: build/shot-windows.bmp
 
   macos:
-    runs-on: macos-latest  # Apple Silicon (arm64)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      SDL_VERSION: 2.32.10
     steps:
       - uses: actions/checkout@v4
-      - run: brew install sdl2 pkg-config dylibbundler
-      - run: make
-      # A standard .app with SDL2 copied inside, so it runs without Homebrew.
+      # SDL2 is built from the official source as a static, universal
+      # library. Homebrew's sdl2 is now sdl2-compat, which loads SDL3 at run
+      # time and cannot be bundled reliably; static linking needs no bundled
+      # dylibs at all and gives one binary for Apple Silicon and Intel.
+      - name: Build static SDL2
+        run: |
+          curl -fsSL -o sdl.tar.gz \
+            "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL2-${SDL_VERSION}.tar.gz"
+          tar -xzf sdl.tar.gz
+          cmake -S "SDL2-${SDL_VERSION}" -B sdl-build -DCMAKE_BUILD_TYPE=Release \
+                -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF \
+                -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build sdl-build --parallel
+          cmake --install sdl-build --prefix "$PWD/sdl"
+      - name: Build
+        run: |
+          export PKG_CONFIG_PATH="$PWD/sdl/lib/pkgconfig"
+          make CC="clang -arch arm64 -arch x86_64 -mmacosx-version-min=11.0" \
+               SDL_CFLAGS="$(pkg-config --cflags sdl2)" \
+               SDL_LIBS="$(pkg-config --static --libs sdl2)"
+          lipo -info build/pc_midi_keyboard
       - name: Make app bundle
         run: |
           APP="pkg/PC MIDI Keyboard.app"
@@ -107,43 +138,33 @@ jobs:
               sips -z $s $s icon.png --out icon.iconset/icon_${s}x${s}.png
             done &&
             iconutil -c icns icon.iconset -o "$APP/Contents/Resources/AppIcon.icns" ) || echo "icon skipped"
-          # Copy every non-system dylib into the bundle and point the
-          # binary at the copies.
-          dylibbundler -od -b -x "$APP/Contents/MacOS/pc_midi_keyboard" \
-                       -d "$APP/Contents/Frameworks" -p @executable_path/../Frameworks/
-          # Newer Homebrew sdl2 is sdl2-compat, which loads SDL3 at run
-          # time; dylibbundler cannot see that, so bundle SDL3 too.
-          if brew list sdl3 >/dev/null 2>&1; then
-            cp "$(brew --prefix sdl3)/lib/libSDL3.0.dylib" "$APP/Contents/Frameworks/"
-            install_name_tool -id @executable_path/../Frameworks/libSDL3.0.dylib \
-                              "$APP/Contents/Frameworks/libSDL3.0.dylib"
-          fi
-          # Editing the binaries breaks their signatures; Apple Silicon kills
-          # unsigned code, so re-sign ad hoc.
+          # Ad-hoc signature for the whole bundle (no Apple developer ID).
           codesign --force --deep -s - "$APP"
-      - name: Check bundle has no Homebrew references
+      - name: Check binary needs only system libraries
         run: |
-          APP="pkg/PC MIDI Keyboard.app"
-          if otool -L "$APP"/Contents/MacOS/* "$APP"/Contents/Frameworks/* | grep -E '/opt/homebrew|/usr/local'; then
-            echo "bundle still depends on Homebrew"; exit 1
+          otool -L "pkg/PC MIDI Keyboard.app/Contents/MacOS/pc_midi_keyboard"
+          if otool -L "pkg/PC MIDI Keyboard.app/Contents/MacOS/pc_midi_keyboard" | tail -n +2 | grep -vE '^[[:space:]]*(/System/Library/|/usr/lib/)'; then
+            echo "binary depends on a non-system library"; exit 1
           fi
       - name: Smoke test
+        timeout-minutes: 2
         run: '"pkg/PC MIDI Keyboard.app/Contents/MacOS/pc_midi_keyboard" --screenshot build/shot-macos.bmp --demo'
       - name: Package
         run: |
           mkdir -p dist
           # ditto keeps the bundle's symlinks, permissions and signature.
-          ditto -c -k --keepParent "pkg/PC MIDI Keyboard.app" dist/pc_midi_keyboard-macos-arm64.zip
+          ditto -c -k --keepParent "pkg/PC MIDI Keyboard.app" dist/pc_midi_keyboard-macos-universal.zip
       - uses: actions/upload-artifact@v4
         with:
           name: package-macos
           path: dist/*
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: screenshot-macos
           path: build/shot-macos.bmp
-
   release:
+    timeout-minutes: 10
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [linux, windows, macos]
     runs-on: ubuntu-latest
