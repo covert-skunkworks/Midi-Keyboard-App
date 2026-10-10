@@ -148,7 +148,7 @@ jobs:
       - name: Check binary needs only system libraries
         run: |
           otool -L "pkg/PC MIDI Keyboard.app/Contents/MacOS/pc_midi_keyboard"
-          if otool -L "pkg/PC MIDI Keyboard.app/Contents/MacOS/pc_midi_keyboard" | tail -n +2 | grep -vE '^[[:space:]]*(/System/Library/|/usr/lib/)'; then
+          if otool -L "pkg/PC MIDI Keyboard.app/Contents/MacOS/pc_midi_keyboard" | grep -E '^[[:space:]]' | grep -vE '^[[:space:]]*(/System/Library/|/usr/lib/)'; then
             echo "binary depends on a non-system library"; exit 1
           fi
       - name: Smoke test
