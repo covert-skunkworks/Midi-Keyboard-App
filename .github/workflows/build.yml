@@ -104,10 +104,15 @@ jobs:
           cmake --install sdl-build --prefix "$PWD/sdl"
       - name: Build
         run: |
-          export PKG_CONFIG_PATH="$PWD/sdl/lib/pkgconfig"
+          SDL_CFLAGS="$(sdl/bin/sdl2-config --cflags)"
+          SDL_LIBS="$(sdl/bin/sdl2-config --static-libs)"
+          echo "SDL_CFLAGS=$SDL_CFLAGS"
+          echo "SDL_LIBS=$SDL_LIBS"
+          if [ -z "$SDL_CFLAGS" ] || [ -z "$SDL_LIBS" ]; then
+            echo "sdl2-config returned no flags"; exit 1
+          fi
           make CC="clang -arch arm64 -arch x86_64 -mmacosx-version-min=11.0" \
-               SDL_CFLAGS="$(pkg-config --cflags sdl2)" \
-               SDL_LIBS="$(pkg-config --static --libs sdl2)"
+               SDL_CFLAGS="$SDL_CFLAGS" SDL_LIBS="$SDL_LIBS"
           lipo -info build/pc_midi_keyboard
       - name: Make app bundle
         run: |
